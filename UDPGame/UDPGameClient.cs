@@ -1,63 +1,74 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net.Sockets;
 using System.Net;
-using System.Text;
-using System.Threading.Tasks;
-using System.Diagnostics;
-using System.Threading;
-using MessagePack;
-using MessagePack.Resolvers;
+using System.Net.Sockets;
+using UDPGameShared;
 
-namespace UDPGame
+namespace UDPGame;
+
+public sealed class UDPGameClient : IDisposable
 {
-    public class UDPGameClient
-    {
-        UdpClient udpClient;
-        IPEndPoint endPoint;
-        Action<byte[]> OnDataRecieved;
-   
-        public UDPGameClient(Action<byte[]> onDataRecieved)
-        {
-            udpClient = new UdpClient();
-            IPAddress serverIP = IPAddress.Parse("127.0.0.1");
-            int serverPort = 1234;
-            endPoint = new IPEndPoint(serverIP, serverPort);
-            udpClient.Connect(endPoint);
-            Thread recieveTrhread = new Thread(() => RecieveDataFromServer());
-            recieveTrhread.IsBackground = true;
-            recieveTrhread.Start();
-            this.OnDataRecieved = onDataRecieved;
+    private readonly UdpClient _udpClient = new();
+    private readonly Action<INetworkMessage> _onMessage;
+    private readonly Func<int> _getLatencyMs;
+    private bool _running = true;
 
-        }      
-        ///only reason for async is to support the fake latency
-        public async void SendDataToServer(NetworkMessage message)
+    public UDPGameClient(Action<INetworkMessage> onMessage, Func<int> getLatencyMs)
+    {
+        _onMessage = onMessage;
+        _getLatencyMs = getLatencyMs;
+        _udpClient.Connect(IPAddress.Loopback.ToString(), 1234);
+
+        var receiveThread = new Thread(ReceiveLoop) { IsBackground = true };
+        receiveThread.Start();
+    }
+
+    public async void Send(INetworkMessage message)
+    {
+        try
         {
-            await Task.Delay(Game1.LATENCY);
-            byte[] messageBytes = new byte[1024];
-            byte messageTypeByte = message.GetMessageTypeAsByte;
-            switch (message.MessageType)
-            {
-                //We dont wont to send snapshots, only recive :)
-                case MessageType.MovementUpdate:
-                    messageBytes = MessagePackSerializer.Serialize((MovementUpdate)message);
-                    break;
-                default:
-                    break;
-            }
-            byte[] combinedBytes = new byte[1 + messageBytes.Length];
-            combinedBytes[0] = messageTypeByte;
-            Buffer.BlockCopy(messageBytes, 0, combinedBytes, 1, messageBytes.Length);
-            udpClient.Send(combinedBytes);
+            // One-way latency from client to server.
+            await Task.Delay(_getLatencyMs());
+            byte[] bytes = MessageSerializer.Serialize(message);
+            _udpClient.Send(bytes, bytes.Length);
         }
-        void RecieveDataFromServer()
+        catch (ObjectDisposedException)
         {
-            while (true)
+        }
+    }
+
+    private void ReceiveLoop()
+    {
+        var server = new IPEndPoint(IPAddress.Any, 0);
+
+        while (_running)
+        {
+            try
             {
-                byte[] serverResponse = udpClient.Receive(ref endPoint);
-                OnDataRecieved.Invoke(serverResponse);
+                byte[] bytes = _udpClient.Receive(ref server);
+                DeliverAfterLatency(bytes);
+            }
+            catch (SocketException) when (!_running)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
             }
         }
+    }
+
+    private async void DeliverAfterLatency(byte[] bytes)
+    {
+        // The same one-way latency is also applied from server to client.
+        // The simulated round-trip time is therefore roughly latency * 2.
+        await Task.Delay(_getLatencyMs());
+        if (_running)
+        {
+            _onMessage(MessageSerializer.Deserialize(bytes));
+        }
+    }
+
+    public void Dispose()
+    {
+        _running = false;
+        _udpClient.Dispose();
     }
 }

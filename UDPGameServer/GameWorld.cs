@@ -1,40 +1,37 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using UDPGameShared;
 
-namespace UDPGameServer
+namespace UDPGameServer;
+
+internal sealed class GameWorld
 {
-    internal class GameWorld
+    private const float MoveSpeed = 4f;
+    public const string BallId = "ball";
+    private float _ballX = 400f;
+    private float _ballY = 240f;
+    private int _lastProcessedInput;
+    private int _snapshotSequence;
+
+    public void ApplyInput(MovementInputMessage input)
     {
-        float ballMoveSpeed=4;
-        /// <summary>
-        ///this is half window size from mono game. used to define the world in pixels...
-        ///Should probably be in a different format and fitted the clients resolution
-        /// </summary>
-        float ballPosX = 400;
-        float ballPosY = 240;
-        int snapShotId = 0;
-        public GameWorld()
+        if (input.Sequence <= _lastProcessedInput)
         {
-        }    
-        public void UpdateBallMovement(MovementUpdate mov)
-        {
-            if (mov.Moveleft)
-            {
-                ballPosX -= 1 * ballMoveSpeed;
-            }
-            else
-            {
-                ballPosX += 1 * ballMoveSpeed;
-            }
-            snapShotId = mov.SequenceNumber;
+            return; // Ignore old or duplicate UDP input.
         }
-        public SnapShot GetWorldStateSnapShot()
+
+        _ballX += input.DirectionX * MoveSpeed;
+        _ballY += input.DirectionY * MoveSpeed;
+        _lastProcessedInput = input.Sequence;
+    }
+
+    public ObjectSnapshotMessage CreateSnapshot()
+    {
+        return new ObjectSnapshotMessage
         {
-            return new SnapShot() {ballPosY=ballPosY, ballPosX=ballPosX,SnapSeqId =snapShotId };
-        }
+            ObjectId = BallId,
+            SnapshotSequence = ++_snapshotSequence,
+            LastProcessedInput = _lastProcessedInput,
+            PositionX = _ballX,
+            PositionY = _ballY
+        };
     }
 }

@@ -1,153 +1,177 @@
-﻿using MessagePack;
+using System.Collections.Concurrent;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
-using System.Net;
-using System.Net.Sockets;
+using UDPGameShared;
 
-namespace UDPGame
+namespace UDPGame;
+
+public sealed class Game1 : Game
 {
-    public class Game1 : Game
+    private readonly GraphicsDeviceManager _graphics;
+    private readonly DemoSettings _settings = new();
+    private readonly ConcurrentQueue<INetworkMessage> _incomingMessages = new();
+
+    private SpriteBatch _spriteBatch = null!;
+    private SpriteFont _font = null!;
+    private UDPGameClient _client = null!;
+    private Ball _ball = null!;
+    private KeyboardState _currentKeyboard;
+    private KeyboardState _previousKeyboard;
+    private int _framesThisSecond;
+    private int _clientFramesPerSecond;
+    private double _frameTimer;
+
+    public Game1()
     {
-        private GraphicsDeviceManager _graphics;
-        private SpriteBatch _spriteBatch;
-        List<GameObject> gamebjects = new List<GameObject>();
-        public static bool USE_INTERPOLATION = true;
-        public static bool USE_RECONCILITION = true;
-        public static bool USE_PREDICTION = true;
-        public static int LATENCY = 250;
-        private SpriteFont font;
-        Ball ball;
-        UDPGameClient client;
-        public Game1()
+        _graphics = new GraphicsDeviceManager(this);
+        Content.RootDirectory = "Content";
+        IsMouseVisible = true;
+
+        // Rendering is independent of the server tickrate and runs as fast as
+        // the machine allows. NetworkGameObject still sends input at 60 Hz.
+        IsFixedTimeStep = false;
+        _graphics.SynchronizeWithVerticalRetrace = false;
+    }
+
+    protected override void Initialize()
+    {
+        _client = new UDPGameClient(
+            message => _incomingMessages.Enqueue(message),
+            () => _settings.SimulatedOneWayLatencyMs);
+
+        var startPosition = new Vector2(
+            GraphicsDevice.Viewport.Width / 2f,
+            GraphicsDevice.Viewport.Height / 2f);
+
+        _ball = new Ball(startPosition, _client, _settings);
+        _client.Send(new JoinMessage());
+        base.Initialize();
+    }
+
+    protected override void LoadContent()
+    {
+        _spriteBatch = new SpriteBatch(GraphicsDevice);
+        _font = Content.Load<SpriteFont>("font");
+        _ball.LoadContent(Content);
+    }
+
+    protected override void Update(GameTime gameTime)
+    {
+        _previousKeyboard = _currentKeyboard;
+        _currentKeyboard = Keyboard.GetState();
+
+        if (_currentKeyboard.IsKeyDown(Keys.Escape))
         {
-            _graphics = new GraphicsDeviceManager(this);
-            Content.RootDirectory = "Content";
-            IsMouseVisible = true;
+            Exit();
         }
 
+        HandleSettingsInput();
+        HandleIncomingMessages();
+        _ball.Update(gameTime, _currentKeyboard);
 
-        protected override void Initialize()
+        base.Update(gameTime);
+    }
+
+    private void HandleSettingsInput()
+    {
+        if (WasPressed(Keys.P))
         {
-            //force FPS, makes it easier to create functional network code, otherwise time is a factor...
-            this.IsFixedTimeStep = true;//false;
-            this.TargetElapsedTime = TimeSpan.FromSeconds(1d / 60d); //60);
-            base.Initialize();
-            client = new UDPGameClient(onDataRecieved);
-            client.SendDataToServer(new JoinMessage());
-            StartGame();
+            _settings.PredictionEnabled = !_settings.PredictionEnabled;
         }
 
-        private void onDataRecieved(byte[] receivedData)
+        if (WasPressed(Keys.R))
         {
-            MessageType messageType = (MessageType)receivedData[0];
-            byte[] dataToDeserialize = receivedData.Skip(1).ToArray();
-            switch (messageType)
+            _settings.ReconciliationEnabled = !_settings.ReconciliationEnabled;
+        }
+
+        if (WasPressed(Keys.I))
+        {
+            _settings.InterpolationEnabled = !_settings.InterpolationEnabled;
+        }
+
+        if (WasPressed(Keys.OemPlus) || WasPressed(Keys.Add))
+        {
+            _settings.SimulatedOneWayLatencyMs += 25;
+        }
+
+        if (WasPressed(Keys.OemMinus) || WasPressed(Keys.Subtract))
+        {
+            _settings.SimulatedOneWayLatencyMs = Math.Max(
+                0,
+                _settings.SimulatedOneWayLatencyMs - 25);
+        }
+    }
+
+    private bool WasPressed(Keys key)
+    {
+        return _currentKeyboard.IsKeyDown(key) && _previousKeyboard.IsKeyUp(key);
+    }
+
+    private void HandleIncomingMessages()
+    {
+        while (_incomingMessages.TryDequeue(out INetworkMessage? message))
+        {
+            switch (message)
             {
-                case MessageType.SnapShot:
-                    SnapShot snap = MessagePackSerializer.Deserialize<SnapShot>(dataToDeserialize);
-                    ball.HandleSnapShot(snap);
+                case JoinResultMessage joinResult:
+                    _ball.IsOwnedByThisClient = joinResult.OwnedObjectId == _ball.ObjectId;
                     break;
-                case MessageType.JoinAnswer:
-                    ball.Owner = MessagePackSerializer.Deserialize<JoinAnswer>(dataToDeserialize).BallOwner;
+                case ObjectSnapshotMessage snapshot:
+                    _ball.HandleSnapshot(snapshot);
                     break;
-                    case MessageType.UpdateTickRate:
-                    ball.SetTickRate(MessagePackSerializer.Deserialize<UpdateTickRate>(dataToDeserialize).TickRate);
-                    break;
-                default:
+                case ServerSettingsMessage serverSettings:
+                    _settings.ServerTickRate = serverSettings.TickRate;
                     break;
             }
         }
+    }
 
-        void StartGame()
+    protected override void Draw(GameTime gameTime)
+    {
+        UpdateFrameCounter(gameTime);
+        GraphicsDevice.Clear(Color.CornflowerBlue);
+
+        _spriteBatch.Begin();
+        _ball.Draw(_spriteBatch);
+        _spriteBatch.DrawString(_font, BuildStatusText(), Vector2.Zero, Color.Black);
+        _spriteBatch.End();
+
+        base.Draw(gameTime);
+    }
+
+    private void UpdateFrameCounter(GameTime gameTime)
+    {
+        _framesThisSecond++;
+        _frameTimer += gameTime.ElapsedGameTime.TotalSeconds;
+
+        if (_frameTimer >= 1d)
         {
-            ball = new Ball("ball", Content, new Vector2(GraphicsDevice.Viewport.Bounds.Width / 2, GraphicsDevice.Viewport.Bounds.Height / 2), client);
-            gamebjects.Add(ball);
-            gamebjects.ForEach(x => x.Init());
+            _clientFramesPerSecond = _framesThisSecond;
+            _framesThisSecond = 0;
+            _frameTimer -= 1d;
         }
+    }
 
+    private string BuildStatusText()
+    {
+        string ownership = _ball.IsOwnedByThisClient
+            ? "You own the ball - hold W/A/S/D to move"
+            : "You observe the server-owned ball";
 
-        protected override void LoadContent()
-        {
-            _spriteBatch = new SpriteBatch(GraphicsDevice);
-            font = Content.Load<SpriteFont>("font");
-            gamebjects.ForEach(x => x.LoadContent());
-            // TODO: use this.Content to load your game content here
-        }
-       
+        return $"{ownership}\n" +
+               $"Client rendering: {_clientFramesPerSecond} FPS\n" +
+               $"Server tickrate: {_settings.ServerTickRate} Hz (server command: tick <hz>)\n" +
+               $"Simulated latency: {_settings.SimulatedOneWayLatencyMs} ms each way " +
+               $"(~{_settings.SimulatedOneWayLatencyMs * 2} ms RTT) [+/-]\n" +
+               $"Prediction: {_settings.PredictionEnabled} [P]\n" +
+               $"Reconciliation: {_settings.ReconciliationEnabled} [R]\n" +
+               $"Interpolation: {_settings.InterpolationEnabled} [I]";
+    }
 
-        protected override void Update(GameTime gameTime)
-        {
-            if (GamePad.GetState(PlayerIndex.One).Buttons.Back == ButtonState.Pressed || Keyboard.GetState().IsKeyDown(Keys.Escape))
-                Exit();
-            GetState();
-            if (HasBeenPressed(Keys.Add))
-            {
-                Debug.WriteLine("hello");
-                LATENCY += 50;
-            }
-            if (HasBeenPressed(Keys.OemMinus))
-            {
-                LATENCY -= 50;
-            }
-            if (HasBeenPressed(Keys.P))
-            {
-                Debug.WriteLine("hello");
-                USE_PREDICTION = !USE_PREDICTION;
-            }
-            if (HasBeenPressed(Keys.I))
-            {
-                USE_INTERPOLATION = !USE_INTERPOLATION;
-            }
-            if (HasBeenPressed(Keys.R))
-            {
-                USE_RECONCILITION = !USE_RECONCILITION;
-            }
-            var kstate = Keyboard.GetState();
-           
-            gamebjects.ForEach(x => x.Update(gameTime));
-            base.Update(gameTime);
-        }
-        static KeyboardState currentKeyState;
-        static KeyboardState previousKeyState;
-
-        public  KeyboardState GetState()
-        {
-            previousKeyState = currentKeyState;
-            currentKeyState = Microsoft.Xna.Framework.Input.Keyboard.GetState();
-            return currentKeyState;
-        }
-
-        public bool HasBeenPressed(Keys key)
-        {
-            return currentKeyState.IsKeyDown(key) && !previousKeyState.IsKeyDown(key);
-        }
-        protected override void Draw(GameTime gameTime)
-        {
-            GraphicsDevice.Clear(Color.CornflowerBlue);
-            _spriteBatch.Begin();
-            gamebjects.ForEach(x => x.Draw(gameTime, _spriteBatch));
-            DrawStats(_spriteBatch);
-            _spriteBatch.End();
-
-            // TODO: Add your drawing code here
-
-            base.Draw(gameTime);
-        }
-        void DrawStats(SpriteBatch _spriteBatch)
-        {
-            string stringToDraw01 = ball.Owner ? "You own the ball\n controls A to move left, D to move right\n" : "you dont own the ball\n";
-            string stringToDraw0 = $"latency: {LATENCY} + to add 50 - to decrease 50\n";
-            string stringToDraw1 = $"prediction on: {USE_PREDICTION} p to toglle\n";
-            string stringToDraw2 = $"Reconciliation on: {USE_RECONCILITION} r to toggle\n";
-            string stringToDraw3 = $"Interpolation on: {USE_INTERPOLATION} i to toggle\n";
-
-            string finalstring = stringToDraw01+ stringToDraw0 + stringToDraw1 + stringToDraw2 + stringToDraw3;
-            _spriteBatch.DrawString(font, finalstring, Vector2.Zero, Color.Black);
-        }
+    protected override void UnloadContent()
+    {
+        _client.Dispose();
+        base.UnloadContent();
     }
 }
