@@ -18,7 +18,7 @@ internal sealed class GameServer : IDisposable
     private readonly object _sendLock = new();
 
     private IPEndPoint? _ballOwner;
-    private volatile int _tickRate = 3;
+    private volatile int _tickRate = 30;
     private volatile bool _running = true;
 
     public void Run()
